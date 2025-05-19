@@ -6,7 +6,8 @@ from transformers import (
     AutoTokenizer,
     AutoModelForCausalLM,
     Trainer,
-    TrainingArguments
+    TrainingArguments,
+    default_data_collator
 )
 from peft import LoraConfig, get_peft_model, TaskType
 
@@ -20,6 +21,7 @@ tokenizer = AutoTokenizer.from_pretrained(
     use_fast=False,
     trust_remote_code=True
 )
+# Llama-2 chat tokenizer doesn’t set pad_token by default—use eos_token instead
 if tokenizer.pad_token is None:
     tokenizer.pad_token = tokenizer.eos_token
 
@@ -28,7 +30,7 @@ def preprocess(examples):
     out = {"input_ids": [], "labels": []}
 
     for prompt, completion in zip(examples["prompt"], examples["completion"]):
-        # tokenize prompt and completion separately
+        # tokenize prompt & completion
         tokp = tokenizer(prompt, add_special_tokens=False)
         tokc = tokenizer(completion, add_special_tokens=False)
 
@@ -40,7 +42,7 @@ def preprocess(examples):
         labs = [-100] * len(tokp["input_ids"]) + tokc["input_ids"]
         labs = labs[:1024]
 
-        # pad both to 1024
+        # pad both to length 1024
         pad_len = 1024 - len(ids)
         ids += [tokenizer.pad_token_id] * pad_len
         labs += [-100] * pad_len
@@ -48,16 +50,17 @@ def preprocess(examples):
         out["input_ids"].append(ids)
         out["labels"].append(labs)
 
-    # convert to proper batches/tensors
-    batch = {
+    # attention mask: 1 for real tokens, 0 for padding
+    attention_masks = [
+        [1 if token_id != tokenizer.pad_token_id else 0 for token_id in seq]
+        for seq in out["input_ids"]
+    ]
+
+    return {
         "input_ids": out["input_ids"],
-        "labels": out["labels"],
-        "attention_mask": [
-            [1 if token_id != tokenizer.pad_token_id else 0 for token_id in seq]
-            for seq in out["input_ids"]
-        ]
+        "attention_mask": attention_masks,
+        "labels": out["labels"]
     }
-    return batch
 
 train_ds = ds.map(
     preprocess,
@@ -96,7 +99,6 @@ training_args = TrainingArguments(
     fp16=True,
     logging_steps=10,
     save_steps=100,
-    label_pad_token_id=-100,
 )
 
 # ─── 7) Trainer & launch ─────────────────────────────────────────────────────────
@@ -105,6 +107,7 @@ trainer = Trainer(
     args=training_args,
     train_dataset=train_ds,
     tokenizer=tokenizer,
+    data_collator=default_data_collator,
 )
 
 if __name__ == "__main__":
