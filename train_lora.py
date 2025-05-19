@@ -1,22 +1,13 @@
-# train_lora_cpu.py
-
-import os
+# train_lora.py
 import torch
 from datasets import load_dataset
-from transformers import (
-    AutoTokenizer,
-    AutoModelForCausalLM,
-    Trainer,
-    TrainingArguments
-)
+from transformers import AutoTokenizer, AutoModelForCausalLM, Trainer, TrainingArguments
 from peft import LoraConfig, get_peft_model, TaskType
 
-# ─── 1) Locate training data ───────────────────────────────────────────────────
-BASE = os.path.dirname(os.path.abspath(__file__))
-data_path = os.path.join(BASE, "training_data.jsonl")
-ds = load_dataset("json", data_files=data_path, split="train")
+# ─── 1) Dataset ─────────────────────────────────────────────────────────────────
+ds = load_dataset("json", data_files="training_data.jsonl", split="train")
 
-# ─── 2) Tokenizer ──────────────────────────────────────────────────────────────
+# ─── 2) Tokenizer ────────────────────────────────────────────────────────────────
 MODEL_NAME = "meta-llama/Llama-2-7b-chat-hf"
 tokenizer = AutoTokenizer.from_pretrained(
     MODEL_NAME,
@@ -24,21 +15,29 @@ tokenizer = AutoTokenizer.from_pretrained(
     trust_remote_code=True
 )
 
-# ─── 3) Preprocessing ──────────────────────────────────────────────────────────
-def preprocess(example):
-    enc = tokenizer(
-        example["prompt"],
+# ─── Pad token fix ───────────────────────────────────────────────────────────────
+# Llama-2 chat tokenizer has no pad_token by default; use eos_token instead
+if tokenizer.pad_token is None:
+    tokenizer.pad_token = tokenizer.eos_token
+
+# ─── 3) Preprocessing ────────────────────────────────────────────────────────────
+def preprocess(examples):
+    inputs = tokenizer(
+        examples["prompt"],
         truncation=True,
-        max_length=1024
+        max_length=1024,
+        padding="max_length"
     )
+    # switch to target tokenizer for labels
     with tokenizer.as_target_tokenizer():
-        lbl = tokenizer(
-            example["completion"],
+        labels = tokenizer(
+            examples["completion"],
             truncation=True,
-            max_length=256
+            max_length=256,
+            padding="max_length"
         )
-    enc["labels"] = lbl["input_ids"]
-    return enc
+    inputs["labels"] = labels["input_ids"]
+    return inputs
 
 train_ds = ds.map(
     preprocess,
@@ -46,16 +45,20 @@ train_ds = ds.map(
     remove_columns=["prompt", "completion"]
 )
 
-# ─── 4) Load model ON CPU, full-precision ───────────────────────────────────────
+# ─── 4) Model (8-bit on GPU) ──────────────────────────────────────────────────────
 model = AutoModelForCausalLM.from_pretrained(
     MODEL_NAME,
+    load_in_8bit=True,
+    device_map="auto",
+    torch_dtype=torch.float16,
     trust_remote_code=True,
-    torch_dtype=torch.float32,
-    device_map="cpu",
-    low_cpu_mem_usage=True    # reduces peak RAM
+    use_auth_token=True
 )
 
-# ─── 5) Attach LoRA adapters ────────────────────────────────────────────────────
+# ensure the pad_token is in the model embeddings
+model.resize_token_embeddings(len(tokenizer))
+
+# ─── 5) LoRA config ──────────────────────────────────────────────────────────────
 peft_config = LoraConfig(
     task_type=TaskType.CAUSAL_LM,
     inference_mode=False,
@@ -65,16 +68,14 @@ peft_config = LoraConfig(
 )
 model = get_peft_model(model, peft_config)
 
-# ─── 6) Training arguments for CPU ──────────────────────────────────────────────
+# ─── 6) Training arguments ───────────────────────────────────────────────────────
 training_args = TrainingArguments(
     output_dir="fine-tuned-loan-extractor",
-    per_device_train_batch_size=1,     # keep tiny on CPU
-    gradient_accumulation_steps=4,     # accumulate to simulate a larger batch
-    gradient_checkpointing=True,       # trade compute for lower memory
+    per_device_train_batch_size=1,
+    gradient_accumulation_steps=8,
     max_steps=500,
     learning_rate=3e-4,
-    fp16=False,                        # no fp16 on CPU
-    bf16=False,                        # no bf16 on CPU
+    fp16=True,
     logging_steps=10,
     save_steps=100
 )
@@ -86,9 +87,8 @@ trainer = Trainer(
     tokenizer=tokenizer
 )
 
-# ─── 7) Train ──────────────────────────────────────────────────────────────────
+# ─── 7) Train & save ─────────────────────────────────────────────────────────────
 if __name__ == "__main__":
-    print("⚠️  Training on CPU only; this will be slow!")
     trainer.train()
     model.save_pretrained("fine-tuned-loan-extractor")
     tokenizer.save_pretrained("fine-tuned-loan-extractor")
