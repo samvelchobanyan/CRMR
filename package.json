@@ -1,0 +1,22 @@
+{
+  "name": "pdfcomp",
+  "version": "1.0.0",
+  "main": "index.js",
+  "scripts": {
+    "extract": "node src/extract.js",
+    "summarize": "node src/parse.js",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "description": "",
+  "dependencies": {
+    "axios": "^1.8.4",
+    "csv-writer": "^1.6.0",
+    "fs-extra": "^11.3.0",
+    "glob": "^11.0.1",
+    "openai": "^4.95.0",
+    "pdf-parse": "^1.1.1"
+  }
+}
